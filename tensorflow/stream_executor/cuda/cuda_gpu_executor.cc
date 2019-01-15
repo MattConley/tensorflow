@@ -1114,7 +1114,6 @@ DeviceDescription *CUDAExecutor::PopulateDeviceDescription() const {
       CUDADriver::GetDeviceAttribute(
           CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, device_)
           .ValueOrDie());
-  uint64 max_blocks;
 
   const char* blank_ptx =
 ".version 6.0\n"
@@ -1137,10 +1136,6 @@ DeviceDescription *CUDAExecutor::PopulateDeviceDescription() const {
   int bpc;
   CUresult result = cuOccupancyMaxActiveBlocksPerMultiprocessor(
       &bpc, blank_function, 1, (size_t)1);
-  if (result != CUDA_SUCCESS) {
-    VLOG(0)<<"Failure.";
-  }
-  VLOG(0)<<"Blocks per core: "<<bpc;
   builder.set_blocks_per_core_limit(bpc);
   auto built = builder.Build();
   return built.release();
