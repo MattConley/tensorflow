@@ -1114,7 +1114,34 @@ DeviceDescription *CUDAExecutor::PopulateDeviceDescription() const {
       CUDADriver::GetDeviceAttribute(
           CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_MULTIPROCESSOR, device_)
           .ValueOrDie());
+  uint64 max_blocks;
 
+  const char* blank_ptx =
+".version 6.0\n"
+".target sm_30\n"
+".address_size 64\n"
+"\n"
+"        // .globl       _Z6ValAddPf\n"
+".visible .entry _Z6ValAddPf(\n"
+")\n"
+"{\n"
+"        ret;\n"
+"}\n";
+  const char* kernel_name = "_Z6ValAddPf";
+
+  CUmodule blank_module;
+  CUfunction blank_function;
+  CUDADriver::LoadPtx(context_, blank_ptx, &blank_module);
+  CUDADriver::GetModuleFunction(context_, blank_module, kernel_name, &blank_function);
+ 
+  int bpc;
+  CUresult result = cuOccupancyMaxActiveBlocksPerMultiprocessor(
+      &bpc, blank_function, 1, (size_t)1);
+  if (result != CUDA_SUCCESS) {
+    VLOG(0)<<"Failure.";
+  }
+  VLOG(0)<<"Blocks per core: "<<bpc;
+  builder.set_blocks_per_core_limit(bpc);
   auto built = builder.Build();
   return built.release();
 }
