@@ -34,6 +34,7 @@ load(
     "if_not_windows",
     "tf_cc_binary",
     "tf_cc_shared_object",
+    "if_linux_x86_64",
     "tf_cc_test",
     "tf_cc_test_mkl",
     "tf_cc_tests",
@@ -774,6 +775,12 @@ tf_cc_test(
         "//tensorflow/core:testlib",
         "@com_google_absl//absl/strings",
     ],
+)
+
+cc_library(
+    name = "crop_resize_bilinear_core",
+    hdrs = ["crop_resize_bilinear_core.h"],
+    visibility = ["//visibility:private"],
 )
 
 # OpKernel libraries ----------------------------------------------------------
@@ -2480,8 +2487,9 @@ tf_kernel_library(
 
 tf_kernel_library(
     name = "crop_and_resize_op",
+    copts = tf_copts() + if_linux_x86_64(["-finline-functions"]),
     prefix = "crop_and_resize_op",
-    deps = IMAGE_DEPS,
+    deps = IMAGE_DEPS + [":crop_resize_bilinear_core"],
 )
 
 tf_kernel_library(
@@ -2552,8 +2560,9 @@ tf_kernel_library(
 
 tf_kernel_library(
     name = "resize_bilinear_op",
+    copts = tf_copts() + if_linux_x86_64(["-finline-functions"]),
     prefix = "resize_bilinear_op",
-    deps = IMAGE_DEPS,
+    deps = IMAGE_DEPS + [":crop_resize_bilinear_core"],
 )
 
 tf_kernel_library(
@@ -5554,6 +5563,7 @@ filegroup(
         "conv_3d.h",
         "conv_ops.h",
         "conv_ops_gpu.h",
+        "crop_resize_bilinear_core.h",
         "data_format_ops.h",
         "depthtospace_op.h",
         "depthwise_conv_op.h",
