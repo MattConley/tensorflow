@@ -44,12 +44,14 @@ struct CachedInterpolation {
   float lerp;
 };
 
-bool compute_single_interpolation_weight(const int in_size,
+template <typename Scaler>
+bool compute_single_interpolation_weight(const Scaler scaler, const int in_size,
                                          const float out2in_scale,
                                          const float out2in_start,
                                          const bool clip, const int i,
                                          int* lower, int* upper, float* lerp) {
-  const float in = i * out2in_scale + out2in_start;
+  // const float in = i * out2in_scale + out2in_start;
+  const float in = scaler(i, out2in_scale) + out2in_start;
   *lower = (int)floor(in);
   *upper = (int)ceil(in);
   *lerp = (float)(in - (float)*lower);
@@ -73,15 +75,17 @@ bool compute_single_interpolation_weight(const int in_size,
  * Returns true if all output indexes have lower and upper (input) indexes
  * within range [0,in_size-1].
  */
-bool compute_interpolation_weights(const int min_i, const int max_i,
-                                   const int in_size, const float out2in_scale,
+template <typename Scaler>
+bool compute_interpolation_weights(const Scaler scaler, const int min_i,
+                                   const int max_i, const int in_size,
+                                   const float out2in_scale,
                                    const float out2in_start, const bool clip,
                                    CachedInterpolation* interpolation) {
   bool rval = true;
   int num_i = max_i - min_i + 1;
   for (int i = 0; i < num_i; ++i) {
     if (!compute_single_interpolation_weight(
-            in_size, out2in_scale, out2in_start, clip, i + min_i,
+            scaler, in_size, out2in_scale, out2in_start, clip, i + min_i,
             &interpolation[i].lower, &interpolation[i].upper,
             &interpolation[i].lerp)) {
       rval = false;
@@ -92,14 +96,15 @@ bool compute_interpolation_weights(const int min_i, const int max_i,
 /**
  * Compatibility method for resize_bilinear_op.cc
  */
-void compute_interpolation_weights(const int out_size, const int in_size,
-                                   const float out2in_scale,
+template <typename Scaler>
+void compute_interpolation_weights(const Scaler scaler, const int out_size,
+                                   const int in_size, const float out2in_scale,
                                    CachedInterpolation* interpolation) {
   interpolation[out_size].lower = 0;
   interpolation[out_size].upper = 0;
   const bool clip = true;
-  if (!compute_interpolation_weights(0, out_size - 1, in_size, out2in_scale,
-                                     0.0f, clip, interpolation)) {
+  if (!compute_interpolation_weights(scaler, 0, out_size - 1, in_size,
+                                     out2in_scale, 0.0f, clip, interpolation)) {
     // Should never happen, check for it anyway
     printf(
         "Warning! Interpolation values have lower,upper indexes outside of "
@@ -113,16 +118,18 @@ void compute_interpolation_weights(const int out_size, const int in_size,
  * returns false.
  * Returns true if min_i >= max_i.
  */
-bool compute_minmax_indexes(const int out_size, const int in_size,
-                            const float out2in_scale, const float out2in_start,
-                            int* min_i, int* max_i) {
+template <typename Scaler>
+bool compute_minmax_indexes(const Scaler scaler, const int out_size,
+                            const int in_size, const float out2in_scale,
+                            const float out2in_start, int* min_i, int* max_i) {
   *min_i = out_size;
   *max_i = -1;
   int lower, upper;
   float lerp;
   for (int i = 0; i < out_size; ++i) {
-    if (compute_single_interpolation_weight(in_size, out2in_scale, out2in_start,
-                                            false, i, &lower, &upper, &lerp)) {
+    if (compute_single_interpolation_weight(scaler, in_size, out2in_scale,
+                                            out2in_start, false, i, &lower,
+                                            &upper, &lerp)) {
       if (i < *min_i) *min_i = i;
       if (i > *max_i) *max_i = i;
     }
@@ -134,22 +141,24 @@ bool compute_minmax_indexes(const int out_size, const int in_size,
  * Also computes extrapolation areas.
  * Returns true if at least one point requires interpolation, false otherwise.
  */
+template <typename Scaler>
 bool compute_interpolation_weights(
-    const int out_size, const int in_size,
+    const Scaler scaler, const int out_size, const int in_size,
     const float x1,  // lower bounding box, crop region starts at in_size*x1
     const float x2,  // upper bounding box, crop region ends at in_size*x2
     int* min_i, int* max_i, std::vector<CachedInterpolation>* interpolation) {
   float out2in_start = out_size > 1
                            ? (float)(in_size - 1) * (float)x1
                            : (float)(in_size - 1) * (float)(x1 + x2) / 2.0f;
-  float out2in_scale = out_size > 1 ? (float)(x2 - x1) * (float)(in_size - 1) /
-                                          (float)(out_size - 1)
-                                    : 0.0f;
-  if (compute_minmax_indexes(out_size, in_size, out2in_scale, out2in_start,
-                             min_i, max_i)) {
+  float out2in_scale =
+      out_size > 1
+          ? (float)(x2 - x1) * (float)(in_size - 1) / (float)(out_size - 1)
+          : 0.0f;
+  if (compute_minmax_indexes(scaler, out_size, in_size, out2in_scale,
+                             out2in_start, min_i, max_i)) {
     interpolation->resize(*max_i - *min_i + 1);
     bool all_inputs_ok = compute_interpolation_weights(
-        *min_i, *max_i, in_size, out2in_scale, out2in_start, false,
+        scaler, *min_i, *max_i, in_size, out2in_scale, out2in_start, false,
         interpolation->data());
     if (!all_inputs_ok) {
       // should never happen, purpose of compute_minmax_indexes is to ensure
@@ -1705,12 +1714,14 @@ template <>
 __m256 VectorLoader<int32>::to_fp32(__m256i raw) {
   return _mm256_cvtepi32_ps(raw);
 }
+#ifdef __F16C__
 template <>
 __m256 VectorLoader<Eigen::half>::to_fp32(__m256i raw) {
   return _mm256_insertf128_ps(
       _mm256_castps128_ps256(_mm_cvtph_ps(_mm256_castsi256_si128(raw))),
       _mm_cvtph_ps(_mm256_extractf128_si256(raw, 1)), 1);
 }
+#endif
 template <>
 __m256 VectorLoader<bfloat16>::to_fp32(__m256i raw) {
   // bfloat16 is essentially fp32 with mantissa truncated from 23 to 7 bits.
