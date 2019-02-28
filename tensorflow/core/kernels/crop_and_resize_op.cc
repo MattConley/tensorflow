@@ -22,18 +22,19 @@ limitations under the License.
 #include <functional>
 #include <string>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/crop_resize_bilinear_core.h"
+#include "tensorflow/core/kernels/image_resizer_state.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/work_sharder.h"
+#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 
 #if GOOGLE_CUDA
 #include "tensorflow/core/common_runtime/gpu/gpu_event_mgr.h"
@@ -233,10 +234,12 @@ struct CropAndResize<CPUDevice, T> {
           std::vector<CachedInterpolation> xs;
           std::vector<CachedInterpolation> ys;
           int min_ix, max_ix, min_iy, max_iy;
-          compute_interpolation_weights(crop_width, image_width, x1, x2,
-                                        &min_ix, &max_ix, &xs);
-          compute_interpolation_weights(crop_height, image_height, y1, y2,
-                                        &min_iy, &max_iy, &ys);
+          // TODO: Should the half_pixel_centers be added to this function?
+          compute_interpolation_weights(LegacyScaler(), crop_width, image_width,
+                                        x1, x2, &min_ix, &max_ix, &xs);
+          compute_interpolation_weights(LegacyScaler(), crop_height,
+                                        image_height, y1, y2, &min_iy, &max_iy,
+                                        &ys);
 
           // multiply by depth to avoid multiplication in resize_single_image.
           for (int i = min_ix; i <= max_ix; ++i) {
@@ -245,17 +248,17 @@ struct CropAndResize<CPUDevice, T> {
           }
 
           crop_resize_single_image_common<T, float>(
-              image.data() + static_cast<int64>(b_in) *
-                                 static_cast<int64>(image_height) *
-                                 static_cast<int64>(image_width) *
-                                 static_cast<int64>(depth),
+              image.data() +
+                  static_cast<int64>(b_in) * static_cast<int64>(image_height) *
+                      static_cast<int64>(image_width) *
+                      static_cast<int64>(depth),
               image_height, image_width, crop_height, crop_width, depth, min_ix,
               max_ix, xs.data(), min_iy, max_iy, ys.data(), extrapolation_value,
               false, false,
-              crops.data() + static_cast<int64>(b) *
-                                 static_cast<int64>(crop_height) *
-                                 static_cast<int64>(crop_width) *
-                                 static_cast<int64>(depth));
+              crops.data() +
+                  static_cast<int64>(b) * static_cast<int64>(crop_height) *
+                      static_cast<int64>(crop_width) *
+                      static_cast<int64>(depth));
           // xs and ys are deallocated automatically when they go out of scope
         } else {  // method == "nearest"
           const float height_scale =
