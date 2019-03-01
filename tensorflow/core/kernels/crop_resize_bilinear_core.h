@@ -978,6 +978,9 @@ class VectorLoader {
   __m128i extract_right_6b_(const __m128i left);
   __m128i extract_right_8b_(const __m128i left);
 #endif
+// Private conversion to fp32 which has different behavior determined by
+// whether or not __F16C__ is defined
+__m128 private_convert_fp16_to_fp32(__m128i raw);
 };
 
 #ifdef __AVX2__
@@ -1714,14 +1717,12 @@ template <>
 __m256 VectorLoader<int32>::to_fp32(__m256i raw) {
   return _mm256_cvtepi32_ps(raw);
 }
-#ifdef __F16C__
 template <>
 __m256 VectorLoader<Eigen::half>::to_fp32(__m256i raw) {
   return _mm256_insertf128_ps(
-      _mm256_castps128_ps256(_mm_cvtph_ps(_mm256_castsi256_si128(raw))),
-      _mm_cvtph_ps(_mm256_extractf128_si256(raw, 1)), 1);
+      _mm256_castps128_ps256(private_convert_fp16_to_fp32(_mm256_castsi256_si128(raw))),
+      private_convert_fp16_to_fp32(_mm256_extractf128_si256(raw, 1)), 1);
 }
-#endif
 template <>
 __m256 VectorLoader<bfloat16>::to_fp32(__m256i raw) {
   // bfloat16 is essentially fp32 with mantissa truncated from 23 to 7 bits.
@@ -1759,69 +1760,7 @@ __m128 VectorLoader<int32>::to_fp32(__m128i raw) {
 }
 template <>
 __m128 VectorLoader<Eigen::half>::to_fp32(__m128i raw) {
-#ifdef __F16C__
-  return _mm_cvtph_ps(raw);
-#else
-  // It is fairly trivial to convert from fp16 to fp32.
-  // The formats are defined as follows:
-  //
-  // fp16 :: 15=sign_bit, 14-10=exponent, 9-0=mantissa :: exp zero offset is 15
-  //      :: exponent of -15 (all 0) and +16 (all 1) are special numbers.
-  // fp32 :: 31=sign_bit, 30-23=exponent, 22-0=mantissa :: exp zero offset is
-  // 127
-  //      :: exponent of -127 (all 0) and +128 (all 1) are special numbers.
-  //
-  // Assuming the fp16 values is stored in the lower 16 bits of an int32
-  // 'fp16_val'.
-  //
-  // fp16_mantissa = fp16_val & (2^10-1)
-  // fp32_mantissa = fp16_mantissa << 13
-  //
-  // The exponent is a little trickier.
-  // For normal numbers, the following works:
-  // fp16_exponent_with_10bit_left_shift = (fp16_val & ((2^5-1)<<10))
-  // fp16_exponent_at_msb = fp16_exponent_with_10bit_left_shift << 17
-  // The next line shifts in 1's from msb
-  // fp16_exponent_at_fp32_position = fp16_exponent_at_msb >> 4
-  // The next line flips the 3 bits from [msb-1,msb-4]
-  // fp32_exponent = fp16_exponent_at_fp32_position ^ (7 << 27)
-  // This breaks for subnormals, nan and infinity.
-  // The only thing that breaks is the 3bit bit flip, which should
-  // happen for normal numbers, but should not happen otherwise.
-  // Since the bit flip can be done with an XOR of all 1's, we
-  // can make this happen by turning the XOR mask to all zeros
-  // when the fp16_exponent is either 0 or 31.
-  //
-  // ..move 16-bit input words to lower part of 32-bit positions.
-  __m128i shuf_lo32 = _mm_setr_epi8(0, 1, -128, -128, 2, 3, -128, -128, 4, 5,
-                                    -128, -128, 6, 7, -128, -128);
-  __m128i fp16_val = _mm_shuffle_epi8(raw, shuf_lo32);
-  // ..extract sign bit
-  __m128i fp32_sign =
-      _mm_slli_epi32(_mm_and_si128(fp16_val, _mm_set1_epi32(32768)), 16);
-  // ..extract fp16_mantissa and shift
-  __m128i fp16_mantissa = _mm_and_si128(fp16_val, _mm_set1_epi32(1023));
-  __m128i fp32_mantissa = _mm_slli_epi32(fp16_mantissa, 13);
-  // ..extract fp16 exponent shifted 10bits to the left
-  __m128i fp16_exponent_sl10 = _mm_and_si128(fp16_val, _mm_set1_epi32(31744));
-  __m128i fp16_exponent_all1_mask =
-      _mm_cmpeq_epi32(fp16_exponent_sl10, _mm_set1_epi32(31 << 10));
-  __m128i fp16_exponent_all0_mask =
-      _mm_cmpeq_epi32(fp16_exponent_sl10, _mm_setzero_si128());
-  __m128i fp16_denormal_mask =
-      _mm_or_si128(fp16_exponent_all0_mask, fp16_exponent_all1_mask);
-  __m128i fp32_exponent_before_xor =
-      _mm_and_si128(_mm_set1_epi32(2139095040),
-                    _mm_srai_epi32(_mm_slli_epi32(fp16_exponent_sl10, 17), 4));
-  __m128i fp32_exponent_xor_mask =
-      _mm_andnot_si128(fp16_denormal_mask, _mm_set1_epi32(7 << 27));
-  __m128i fp32_exponent =
-      _mm_xor_si128(fp32_exponent_xor_mask, fp32_exponent_before_xor);
-  // ..or everything into one word
-  __m128i fp32_val =
-      _mm_or_si128(_mm_or_si128(fp32_sign, fp32_exponent), fp32_mantissa);
-  return _mm_castsi128_ps(fp32_val);
-#endif
+  return private_convert_fp16_to_fp32(raw);
 }
 template <>
 __m128 VectorLoader<bfloat16>::to_fp32(__m128i raw) {
@@ -1889,6 +1828,72 @@ __m128i VectorLoader<T>::extract_right_8b_(const __m128i left) {
   return _mm_srli_si128(left, 8);
 }
 #endif
+
+__m128 VectorLoader::private_convert_fp16_to_fp32(__m128i raw) {
+#ifdef __F16C__
+  return _mm_cvtph_ps(raw);
+#else
+  // It is fairly trivial to convert from fp16 to fp32.
+  // The formats are defined as follows:
+  //
+  // fp16 :: 15=sign_bit, 14-10=exponent, 9-0=mantissa :: exp zero offset is 15
+  //      :: exponent of -15 (all 0) and +16 (all 1) are special numbers.
+  // fp32 :: 31=sign_bit, 30-23=exponent, 22-0=mantissa :: exp zero offset is
+  // 127
+  //      :: exponent of -127 (all 0) and +128 (all 1) are special numbers.
+  //
+  // Assuming the fp16 values is stored in the lower 16 bits of an int32
+  // 'fp16_val'.
+  //
+  // fp16_mantissa = fp16_val & (2^10-1)
+  // fp32_mantissa = fp16_mantissa << 13
+  //
+  // The exponent is a little trickier.
+  // For normal numbers, the following works:
+  // fp16_exponent_with_10bit_left_shift = (fp16_val & ((2^5-1)<<10))
+  // fp16_exponent_at_msb = fp16_exponent_with_10bit_left_shift << 17
+  // The next line shifts in 1's from msb
+  // fp16_exponent_at_fp32_position = fp16_exponent_at_msb >> 4
+  // The next line flips the 3 bits from [msb-1,msb-4]
+  // fp32_exponent = fp16_exponent_at_fp32_position ^ (7 << 27)
+  // This breaks for subnormals, nan and infinity.
+  // The only thing that breaks is the 3bit bit flip, which should
+  // happen for normal numbers, but should not happen otherwise.
+  // Since the bit flip can be done with an XOR of all 1's, we
+  // can make this happen by turning the XOR mask to all zeros
+  // when the fp16_exponent is either 0 or 31.
+  //
+  // ..move 16-bit input words to lower part of 32-bit positions.
+  __m128i shuf_lo32 = _mm_setr_epi8(0, 1, -128, -128, 2, 3, -128, -128, 4, 5,
+                                    -128, -128, 6, 7, -128, -128);
+  __m128i fp16_val = _mm_shuffle_epi8(raw, shuf_lo32);
+  // ..extract sign bit
+  __m128i fp32_sign =
+      _mm_slli_epi32(_mm_and_si128(fp16_val, _mm_set1_epi32(32768)), 16);
+  // ..extract fp16_mantissa and shift
+  __m128i fp16_mantissa = _mm_and_si128(fp16_val, _mm_set1_epi32(1023));
+  __m128i fp32_mantissa = _mm_slli_epi32(fp16_mantissa, 13);
+  // ..extract fp16 exponent shifted 10bits to the left
+  __m128i fp16_exponent_sl10 = _mm_and_si128(fp16_val, _mm_set1_epi32(31744));
+  __m128i fp16_exponent_all1_mask =
+      _mm_cmpeq_epi32(fp16_exponent_sl10, _mm_set1_epi32(31 << 10));
+  __m128i fp16_exponent_all0_mask =
+      _mm_cmpeq_epi32(fp16_exponent_sl10, _mm_setzero_si128());
+  __m128i fp16_denormal_mask =
+      _mm_or_si128(fp16_exponent_all0_mask, fp16_exponent_all1_mask);
+  __m128i fp32_exponent_before_xor =
+      _mm_and_si128(_mm_set1_epi32(2139095040),
+                    _mm_srai_epi32(_mm_slli_epi32(fp16_exponent_sl10, 17), 4));
+  __m128i fp32_exponent_xor_mask =
+      _mm_andnot_si128(fp16_denormal_mask, _mm_set1_epi32(7 << 27));
+  __m128i fp32_exponent =
+      _mm_xor_si128(fp32_exponent_xor_mask, fp32_exponent_before_xor);
+  // ..or everything into one word
+  __m128i fp32_val =
+      _mm_or_si128(_mm_or_si128(fp32_sign, fp32_exponent), fp32_mantissa);
+  return _mm_castsi128_ps(fp32_val);
+#endif
+}
 
 #ifdef __AVX2__
 template <class T>
