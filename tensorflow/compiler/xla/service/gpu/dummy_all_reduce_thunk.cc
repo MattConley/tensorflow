@@ -41,6 +41,10 @@ NcclAllReduceThunk::DevicesWithOpenNcclChannels() {
 
 struct NcclAllReduceThunk::AuxData {};
 
+/*static*/ bool NcclAllReduceThunk::CanImplement(const HloInstruction* crs) {
+  return false;
+}
+
 NcclAllReduceThunk::NcclAllReduceThunk(
     ThunkInfo thunk_info, int64 replica_count,
     std::vector<NcclAllReduceThunk::Buffer> buffers)
